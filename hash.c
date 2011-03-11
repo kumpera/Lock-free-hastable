@@ -14,19 +14,15 @@ typedef unsigned int key_t;
 
 typedef struct _node node_t;
 
-typedef struct {
-	/*Silly GCC doesn't allow me to use pointer in a bitfield*/
-	uintptr_t ptr   : sizeof (uintptr_t) - 1;
-	unsigned marked : 1;
-} mark_ptr_t;
+typedef node_t* mark_ptr_t;
 
 struct _node {
-	node_t *next;
+	mark_ptr_t next;
 	key_t key;
 };
 
 typedef struct {
-	node_t **table;
+	mark_ptr_t *table;
 	unsigned count, size;
 } conc_hashtable_t;
 
@@ -55,83 +51,40 @@ hash_dummy_key (key_t k)
 	return reverse_value (k & ~0x80000000);
 }
 
-//ZZZZ
-unsigned
-atomic_fetch_and_inc (unsigned *t)
-{
-	unsigned r = *t;
-	*t = *t + 1;
-	return r;
-}
+#define atomic_fetch_and_inc(t) __sync_fetch_and_add (t, 1)
+#define atomic_fetch_and_dec(t) __sync_fetch_and_sub (t, 1)
+#define atomic_compare_and_swap(t,old,new) __sync_bool_compare_and_swap (t, old, new)
 
-unsigned
-atomic_fetch_and_dec (unsigned *t)
-{
-	unsigned r = *t;
-	*t = *t - 1;
-	return r;
-}
 
-int
-atomic_compare_and_swap (node_t **t, node_t *old, node_t *new)
-{
-	if (*t == old) {
-		*t = new;
-		return TRUE;
-	}
-	return FALSE;
-}
-
-int
-atomic_compare_and_swap_ptr (void **t, void *old, void *new)
-{
-	if (*t == old) {
-		*t = new;
-		return TRUE;
-	}
-	return FALSE;
-}
-int
-atomic_compare_and_swap_int (unsigned *t, unsigned old, unsigned new)
-{
-	if (*t == old) {
-		*t = new;
-		return TRUE;
-	}
-	return FALSE;
-}
-
-//ZZZZ
-
-static node_t*
+static mark_ptr_t
 mk_node (node_t *n, uintptr_t bit)
 {
-	return  (node_t*)(((uintptr_t)n) | bit);
+	return  (mark_ptr_t)(((uintptr_t)n) | bit);
 }
 
 static node_t*
-get_node (node_t *n)
+get_node (mark_ptr_t n)
 {
 	return  (node_t*)(((uintptr_t)n) & ~(uintptr_t)0x1);
 }
 
 static uintptr_t
-get_bit (node_t *n)
+get_bit (mark_ptr_t n)
 {
 	return  (uintptr_t)n & 0x1;
 }
 
 static void
-delete_node (node_t *node)
+delete_node (mark_ptr_t node)
 {
 	assert (get_bit (node) == 0);
-	free (node);
+	free (get_node (node));
 }
 
-static node_t *cur, *next, **prev;
+static mark_ptr_t cur, next, *prev;
 
 int
-list_find (node_t **head, key_t key)
+list_find (mark_ptr_t *head, key_t key)
 {
 try_again:
 	prev = head;
@@ -158,7 +111,7 @@ try_again:
 }
 
 int
-list_insert (node_t **head, node_t *node)
+list_insert (mark_ptr_t *head, node_t *node)
 {
 	key_t key = node->key;
 
@@ -172,7 +125,7 @@ list_insert (node_t **head, node_t *node)
 }
 
 int
-list_delete (node_t **head, key_t key)
+list_delete (mark_ptr_t *head, key_t key)
 {
 	while (1) {
 		if (!list_find (head, key))
@@ -221,11 +174,12 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 	node_t **old_table = ht->table;
 	node_t **new_table = calloc (sizeof (node_t*), size * 2);
 	memcpy (new_table, old_table, sizeof (node_t*) * size);
-	if (!atomic_compare_and_swap_int (&ht->size, size, size * 2)) {
+	if (!atomic_compare_and_swap (&ht->size, size, size * 2)) {
 		free (new_table);
 		return;
 	}
-	atomic_compare_and_swap_ptr ((void**)&ht->table, old_table, new_table);
+	if (!atomic_compare_and_swap ((void**)&ht->table, old_table, new_table))
+		free (new_table);
 }
 	
 
