@@ -39,13 +39,13 @@ reverse_value (key_t k)
 	return r;
 }
 
-static key_t
+static inline key_t
 hash_regular_key (key_t k)
 {
 	return reverse_value (k | 0x80000000);
 }
 
-static key_t
+static inline key_t
 hash_dummy_key (key_t k)
 {
 	return reverse_value (k & ~0x80000000);
@@ -55,20 +55,23 @@ hash_dummy_key (key_t k)
 #define atomic_fetch_and_dec(t) __sync_fetch_and_sub (t, 1)
 #define atomic_compare_and_swap(t,old,new) __sync_bool_compare_and_swap (t, old, new)
 
+#define load_barrier __builtin_ia32_lfence
+#define store_barrier __builtin_ia32_sfence
+#define memory_barrier __builtin_ia32_mfence
 
-static mark_ptr_t
+static inline mark_ptr_t
 mk_node (node_t *n, uintptr_t bit)
 {
 	return  (mark_ptr_t)(((uintptr_t)n) | bit);
 }
 
-static node_t*
+static inline node_t*
 get_node (mark_ptr_t n)
 {
 	return  (node_t*)(((uintptr_t)n) & ~(uintptr_t)0x1);
 }
 
-static uintptr_t
+static inline uintptr_t
 get_bit (mark_ptr_t n)
 {
 	return  (uintptr_t)n & 0x1;
@@ -83,19 +86,26 @@ delete_node (mark_ptr_t node)
 
 static mark_ptr_t cur, next, *prev;
 
+#define atomic_load(v, p)  do { load_barrier (); v = *(p); } while (0)
+#define atomic_store(p, h) do { store_barrier (); *(p) = v; } while (0);
+
 int
 list_find (mark_ptr_t *head, key_t key)
 {
 try_again:
 	prev = head;
-	cur = *prev;
+	atomic_load (cur, prev);
 	while (1) {
+		mark_ptr_t tmp;
 		if (cur == NULL)
 			return FALSE;
 		next = cur->next;
 		key_t cur_key = cur->key;
-		if (*prev != mk_node (get_node (cur), 0))
+		atomic_load (tmp, prev);
+
+		if (tmp != mk_node (get_node (cur), 0))
 			goto try_again;
+
 		if (!get_bit (next)) {
 			if (cur_key >= key)
 				return cur_key == key;
@@ -165,7 +175,9 @@ initialize_bucket (conc_hashtable_t *ht, unsigned bucket)
 		free (node);
 		node = get_node (cur);
 	}
-	ht->table [bucket] = node;
+
+	store_barrier ();
+	ht->table [bucket] = mk_node (node, 0);
 }
 
 static void
@@ -181,8 +193,6 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 	if (!atomic_compare_and_swap ((void**)&ht->table, old_table, new_table))
 		free (new_table);
 }
-	
-
 
 static int /*BOOL*/
 insert (conc_hashtable_t *ht, key_t key)
