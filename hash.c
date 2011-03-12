@@ -95,14 +95,12 @@ try_again:
 	prev = head;
 	cur = atomic_load (prev);
 	while (1) {
-		mark_ptr_t tmp;
 		if (cur == NULL)
 			goto done;
 		next = cur->next;
 		key_t cur_key = cur->key;
-		tmp = atomic_load (prev);
 
-		if (tmp != mk_node (get_node (cur), 0))
+		if (atomic_load (prev) != mk_node (get_node (cur), 0))
 			goto try_again;
 
 		if (!get_bit (next)) {
