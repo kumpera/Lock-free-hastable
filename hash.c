@@ -84,15 +84,13 @@ delete_node (mark_ptr_t node)
 	free (get_node (node));
 }
 
-static mark_ptr_t next;
-
 #define atomic_load(v, p)  do { load_barrier (); v = *(p); } while (0)
 #define atomic_store(p, h) do { store_barrier (); *(p) = v; } while (0);
 
 mark_ptr_t
 list_find (mark_ptr_t *head, key_t key, mark_ptr_t **out_prev)
 {
-	mark_ptr_t cur, *prev;
+	mark_ptr_t cur, next, *prev;
 try_again:
 	prev = head;
 	atomic_load (cur, prev);
@@ -143,11 +141,12 @@ list_insert (mark_ptr_t *head, node_t *node)
 int
 list_delete (mark_ptr_t *head, key_t key)
 {
-	mark_ptr_t res, *prev;
+	mark_ptr_t res, *prev, next;
 	while (1) {
 		res = list_find (head, key, &prev);
 		if (!res || res->key != key)
 			return FALSE;
+		atomic_load (next, &get_node (res)->next);
 		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
 			continue;
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
@@ -279,10 +278,10 @@ int main ()
 	printf ("%d ", insert (ht, 5));
 	printf ("%d\n", ht->count);
 
-	/*for (i = 0; i < 50; ++i)
+	for (i = 0; i < 50; ++i)
 		insert (ht, i);
 	for (i = 0; i < 50; ++i)
 		printf ("[%d] = %d\n", i, find (ht, i));
-	printf ("total %d\n", ht->count);*/
+	printf ("total %d\n", ht->count);
 	return 0;
 }
