@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <pthread.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -84,7 +85,7 @@ static void
 delete_node (mark_ptr_t node)
 {
 	assert (get_bit (node) == 0);
-	free (get_node (node));
+//	free (get_node (node));
 }
 
 mark_ptr_t
@@ -264,12 +265,35 @@ create (void)
 	return res;
 }
 
+static conc_hashtable_t *_ht;
+
+#define INSERT_CNT 1000000
+static void*
+async_insert (void *arg)
+{
+	int base = INSERT_CNT * (int)(intptr_t)arg;
+	int i;
+	for (i = 0; i < INSERT_CNT; ++i) {
+		insert (_ht, base + i);
+		insert (_ht, base + i - INSERT_CNT);
+	}
+	return NULL;
+}
+
 int main ()
 {
 	int i = 0;
-	conc_hashtable_t *ht = create ();
+	_ht = create ();
+	pthread_t threads[4];
 
-	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
+	for (i = 0; i < 4; ++i)
+		pthread_create (&threads [i], NULL, async_insert, (void*)(intptr_t)i);
+
+	for (i = 0; i < 4; ++i)
+		pthread_join (threads [i], NULL);
+
+	printf ("elements in %d\n", _ht->count);
+/*	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
 	insert (ht, 0);
 	insert (ht, 26);
 	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
@@ -285,6 +309,6 @@ int main ()
 		insert (ht, i);
 	for (i = 0; i < 50; ++i)
 		printf ("[%d] = %d\n", i, find (ht, i));
-	printf ("total %d\n", ht->count);
+	printf ("total %d\n", ht->count);*/
 	return 0;
 }
