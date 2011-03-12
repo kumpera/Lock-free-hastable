@@ -108,7 +108,7 @@ try_again:
 
 		if (!get_bit (next)) {
 			if (cur_key >= key)
-				return cur_key == key ? cur : NULL;
+				return cur;
 			prev = &get_node (cur)->next;
 		} else {
 			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
@@ -123,13 +123,15 @@ try_again:
 int
 list_insert (mark_ptr_t *head, node_t *node)
 {
+	mark_ptr_t res;
 	key_t key = node->key;
 
 	while (1) {
-		if (list_find (head, key))
+		res = list_find (head, key);
+		if (res && res->key == node->key)
 			return FALSE;
-		node->next = mk_node (get_node (cur), 0);
-		if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (node, 0)))
+		node->next = mk_node (get_node (res), 0);
+		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
 			return TRUE;
 	}
 }
@@ -137,13 +139,15 @@ list_insert (mark_ptr_t *head, node_t *node)
 int
 list_delete (mark_ptr_t *head, key_t key)
 {
+	mark_ptr_t res;
 	while (1) {
-		if (!list_find (head, key))
+		res = list_find (head, key);
+		if (!res || res->key != key)
 			return FALSE;
-		if (!atomic_compare_and_swap (&get_node (cur)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
+		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
 			continue;
-		if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
-			delete_node (get_node (cur));
+		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
+			delete_node (get_node (res));
 		else
 			list_find (head, key);
 		return TRUE;
@@ -219,10 +223,12 @@ insert (conc_hashtable_t *ht, key_t key)
 static int
 find (conc_hashtable_t *ht, key_t key)
 {
+	mark_ptr_t res;
 	unsigned bucket = key % ht->size;
 	if (ht->table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, bucket);
-	return list_find (&ht->table [bucket], hash_regular_key (key)) ? 1 : 0;
+	res = list_find (&ht->table [bucket], hash_regular_key (key));
+	return res && get_node (res)->key == hash_regular_key (key);
 }
 
 static int
