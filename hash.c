@@ -84,7 +84,7 @@ delete_node (mark_ptr_t node)
 	free (get_node (node));
 }
 
-static mark_ptr_t cur, next, *prev;
+static mark_ptr_t next, *prev;
 
 #define atomic_load(v, p)  do { load_barrier (); v = *(p); } while (0)
 #define atomic_store(p, h) do { store_barrier (); *(p) = v; } while (0);
@@ -92,6 +92,7 @@ static mark_ptr_t cur, next, *prev;
 mark_ptr_t
 list_find (mark_ptr_t *head, key_t key)
 {
+	mark_ptr_t cur;
 try_again:
 	prev = head;
 	atomic_load (cur, prev);
@@ -120,7 +121,7 @@ try_again:
 	}
 }
 
-int
+mark_ptr_t
 list_insert (mark_ptr_t *head, node_t *node)
 {
 	mark_ptr_t res;
@@ -129,10 +130,10 @@ list_insert (mark_ptr_t *head, node_t *node)
 	while (1) {
 		res = list_find (head, key);
 		if (res && res->key == node->key)
-			return FALSE;
+			return res;
 		node->next = mk_node (get_node (res), 0);
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
-			return TRUE;
+			return node;
 	}
 }
 
@@ -168,6 +169,7 @@ get_parent (unsigned b)
 static void
 initialize_bucket (conc_hashtable_t *ht, unsigned bucket)
 {
+	mark_ptr_t res;
 	unsigned parent = get_parent (bucket);
 	if (ht->table [parent] == UNINITIALIZED)
 		initialize_bucket (ht, parent);
@@ -175,9 +177,10 @@ initialize_bucket (conc_hashtable_t *ht, unsigned bucket)
 	node_t *node = calloc (sizeof (node), 1);
 	node->key = hash_dummy_key (bucket);
 
-	if (!list_insert (&ht->table [parent], node)) {
+	res = list_insert (&ht->table [parent], node);
+	if (get_node (res) != node) {
 		free (node);
-		node = get_node (cur);
+		node = get_node (res);
 	}
 
 	store_barrier ();
@@ -208,7 +211,7 @@ insert (conc_hashtable_t *ht, key_t key)
 
 	if (ht->table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, bucket);
-	if (!list_insert (&ht->table [bucket], node)) {
+	if (get_node (list_insert (&ht->table [bucket], node)) != node) {
 		free (node);
 		return FALSE;
 	}
