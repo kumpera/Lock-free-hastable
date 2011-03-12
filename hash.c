@@ -84,22 +84,22 @@ delete_node (mark_ptr_t node)
 	free (get_node (node));
 }
 
-static mark_ptr_t next, *prev;
+static mark_ptr_t next;
 
 #define atomic_load(v, p)  do { load_barrier (); v = *(p); } while (0)
 #define atomic_store(p, h) do { store_barrier (); *(p) = v; } while (0);
 
 mark_ptr_t
-list_find (mark_ptr_t *head, key_t key)
+list_find (mark_ptr_t *head, key_t key, mark_ptr_t **out_prev)
 {
-	mark_ptr_t cur;
+	mark_ptr_t cur, *prev;
 try_again:
 	prev = head;
 	atomic_load (cur, prev);
 	while (1) {
 		mark_ptr_t tmp;
 		if (cur == NULL)
-			return NULL;
+			goto done;
 		next = cur->next;
 		key_t cur_key = cur->key;
 		atomic_load (tmp, prev);
@@ -109,7 +109,7 @@ try_again:
 
 		if (!get_bit (next)) {
 			if (cur_key >= key)
-				return cur;
+				goto done;
 			prev = &get_node (cur)->next;
 		} else {
 			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
@@ -119,16 +119,19 @@ try_again:
 		}
 		cur = next;
 	}
+done:
+	*out_prev = prev;
+	return cur;
 }
 
 mark_ptr_t
 list_insert (mark_ptr_t *head, node_t *node)
 {
-	mark_ptr_t res;
+	mark_ptr_t res, *prev;
 	key_t key = node->key;
 
 	while (1) {
-		res = list_find (head, key);
+		res = list_find (head, key, &prev);
 		if (res && res->key == node->key)
 			return res;
 		node->next = mk_node (get_node (res), 0);
@@ -140,9 +143,9 @@ list_insert (mark_ptr_t *head, node_t *node)
 int
 list_delete (mark_ptr_t *head, key_t key)
 {
-	mark_ptr_t res;
+	mark_ptr_t res, *prev;
 	while (1) {
-		res = list_find (head, key);
+		res = list_find (head, key, &prev);
 		if (!res || res->key != key)
 			return FALSE;
 		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
@@ -150,7 +153,7 @@ list_delete (mark_ptr_t *head, key_t key)
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
 			delete_node (get_node (res));
 		else
-			list_find (head, key);
+			list_find (head, key, &prev);
 		return TRUE;
 	}
 }
@@ -226,11 +229,11 @@ insert (conc_hashtable_t *ht, key_t key)
 static int
 find (conc_hashtable_t *ht, key_t key)
 {
-	mark_ptr_t res;
+	mark_ptr_t res, *prev;
 	unsigned bucket = key % ht->size;
 	if (ht->table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, bucket);
-	res = list_find (&ht->table [bucket], hash_regular_key (key));
+	res = list_find (&ht->table [bucket], hash_regular_key (key), &prev);
 	return res && get_node (res)->key == hash_regular_key (key);
 }
 
