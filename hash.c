@@ -89,7 +89,7 @@ static mark_ptr_t cur, next, *prev;
 #define atomic_load(v, p)  do { load_barrier (); v = *(p); } while (0)
 #define atomic_store(p, h) do { store_barrier (); *(p) = v; } while (0);
 
-int
+mark_ptr_t
 list_find (mark_ptr_t *head, key_t key)
 {
 try_again:
@@ -98,7 +98,7 @@ try_again:
 	while (1) {
 		mark_ptr_t tmp;
 		if (cur == NULL)
-			return FALSE;
+			return NULL;
 		next = cur->next;
 		key_t cur_key = cur->key;
 		atomic_load (tmp, prev);
@@ -108,7 +108,7 @@ try_again:
 
 		if (!get_bit (next)) {
 			if (cur_key >= key)
-				return cur_key == key;
+				return cur_key == key ? cur : NULL;
 			prev = &get_node (cur)->next;
 		} else {
 			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
@@ -222,7 +222,7 @@ find (conc_hashtable_t *ht, key_t key)
 	unsigned bucket = key % ht->size;
 	if (ht->table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, bucket);
-	return list_find (&ht->table [bucket], hash_regular_key (key));
+	return list_find (&ht->table [bucket], hash_regular_key (key)) ? 1 : 0;
 }
 
 static int
@@ -267,10 +267,10 @@ int main ()
 	printf ("%d ", insert (ht, 5));
 	printf ("%d\n", ht->count);
 
-	for (i = 0; i < 50; ++i)
+	/*for (i = 0; i < 50; ++i)
 		insert (ht, i);
 	for (i = 0; i < 50; ++i)
 		printf ("[%d] = %d\n", i, find (ht, i));
-	printf ("total %d\n", ht->count);
+	printf ("total %d\n", ht->count);*/
 	return 0;
 }
