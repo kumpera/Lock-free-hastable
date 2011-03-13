@@ -19,7 +19,7 @@ typedef node_t* mark_ptr_t;
 
 struct _node {
 	mark_ptr_t next;
-	key_t key;
+	key_t hash_code;
 };
 
 typedef struct {
@@ -99,7 +99,7 @@ try_again:
 		if (cur == NULL)
 			goto done;
 		next = cur->next;
-		key_t cur_key = cur->key;
+		key_t cur_key = cur->hash_code;
 
 		if (atomic_load (prev) != mk_node (get_node (cur), 0))
 			goto try_again;
@@ -125,11 +125,11 @@ mark_ptr_t
 list_insert (mark_ptr_t *head, node_t *node)
 {
 	mark_ptr_t res, *prev;
-	key_t key = node->key;
+	key_t key = node->hash_code;
 
 	while (1) {
 		res = list_find (head, key, &prev);
-		if (res && res->key == node->key)
+		if (res && res->hash_code == node->hash_code)
 			return res;
 		node->next = mk_node (get_node (res), 0);
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
@@ -143,7 +143,7 @@ list_delete (mark_ptr_t *head, key_t key)
 	mark_ptr_t res, *prev, next;
 	while (1) {
 		res = list_find (head, key, &prev);
-		if (!res || res->key != key)
+		if (!res || res->hash_code != key)
 			return FALSE;
 		next = atomic_load (&get_node (res)->next);
 		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
@@ -176,7 +176,7 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 		initialize_bucket (ht, table, parent);
 
 	node_t *node = calloc (sizeof (node), 1);
-	node->key = hash_dummy_key (bucket);
+	node->hash_code = hash_dummy_key (bucket);
 
 	res = list_insert (&table [parent], node);
 	if (get_node (res) != node) {
@@ -205,7 +205,7 @@ static int /*BOOL*/
 insert (conc_hashtable_t *ht, key_t key)
 {
 	node_t *node = calloc (sizeof (node), 1);
-	node->key = hash_regular_key (key);
+	node->hash_code = hash_regular_key (key);
 	mark_ptr_t *table = atomic_load (&ht->table);
 
 	unsigned bucket = key % ht->size;
@@ -235,7 +235,7 @@ find (conc_hashtable_t *ht, key_t key)
 		initialize_bucket (ht, table, bucket);
 
 	res = list_find (&ht->table [bucket], hash_regular_key (key), &prev);
-	return res && get_node (res)->key == hash_regular_key (key);
+	return res && get_node (res)->hash_code == hash_regular_key (key);
 }
 
 static int
@@ -261,7 +261,7 @@ create (void)
 	res->size = 16;
 	res->table = calloc (sizeof (node_t), 16);
 	res->table [0] = calloc (sizeof (node_t), 1);
-	res->table [0]->key = hash_dummy_key (0);
+	res->table [0]->hash_code = hash_dummy_key (0);
 	return res;
 }
 
