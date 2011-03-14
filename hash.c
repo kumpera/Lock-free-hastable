@@ -20,6 +20,7 @@ typedef node_t* mark_ptr_t;
 struct _node {
 	mark_ptr_t next;
 	key_t hash_code;
+	key_t key, value;
 };
 
 typedef struct {
@@ -176,6 +177,7 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 		initialize_bucket (ht, table, parent);
 
 	node_t *node = calloc (sizeof (node), 1);
+	node->key = bucket;
 	node->hash_code = hash_dummy_key (bucket);
 
 	res = list_insert (&table [parent], node);
@@ -205,10 +207,11 @@ static int /*BOOL*/
 insert (conc_hashtable_t *ht, key_t key)
 {
 	node_t *node = calloc (sizeof (node), 1);
+	node->key = key;
 	node->hash_code = hash_regular_key (key);
 	mark_ptr_t *table = atomic_load (&ht->table);
 
-	unsigned bucket = key % ht->size;
+	unsigned bucket = node->hash_code % ht->size;
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
@@ -228,26 +231,28 @@ static int
 find (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
-	unsigned bucket = key % ht->size;
+	key_t hash = hash_regular_key (key);
+	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = atomic_load (&ht->table);
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
-	res = list_find (&ht->table [bucket], hash_regular_key (key), &prev);
-	return res && get_node (res)->hash_code == hash_regular_key (key);
+	res = list_find (&ht->table [bucket], hash, &prev);
+	return res && get_node (res)->hash_code == hash;
 }
 
 static int
 delete (conc_hashtable_t *ht, key_t key)
 {
-	unsigned bucket = key % ht->size;
+	key_t hash = hash_regular_key (key);
+	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = atomic_load (&ht->table);
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
-	if (!list_delete (&ht->table [bucket], hash_regular_key (key)))
+	if (!list_delete (&ht->table [bucket], hash))
 		return FALSE;
 
 	atomic_fetch_and_dec (&ht->count);
@@ -283,7 +288,7 @@ async_insert (void *arg)
 int main ()
 {
 	int i = 0;
-	_ht = create ();
+/*	_ht = create ();
 	pthread_t threads[4];
 
 	for (i = 0; i < 4; ++i)
@@ -292,8 +297,10 @@ int main ()
 	for (i = 0; i < 4; ++i)
 		pthread_join (threads [i], NULL);
 
-	printf ("elements in %d\n", _ht->count);
-/*	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
+	printf ("elements in %d\n", _ht->count);*/
+
+	conc_hashtable_t *ht = create ();
+	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
 	insert (ht, 0);
 	insert (ht, 26);
 	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
@@ -305,6 +312,7 @@ int main ()
 	printf ("%d ", insert (ht, 5));
 	printf ("%d\n", ht->count);
 
+	/*
 	for (i = 0; i < 50; ++i)
 		insert (ht, i);
 	for (i = 0; i < 50; ++i)
