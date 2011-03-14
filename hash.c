@@ -90,7 +90,7 @@ delete_node (mark_ptr_t node)
 }
 
 mark_ptr_t
-list_find (mark_ptr_t *head, key_t key, mark_ptr_t **out_prev)
+list_find (mark_ptr_t *head, key_t key, key_t hash_code, mark_ptr_t **out_prev)
 {
 	mark_ptr_t cur, next, *prev;
 try_again:
@@ -100,13 +100,14 @@ try_again:
 		if (cur == NULL)
 			goto done;
 		next = cur->next;
-		key_t cur_key = cur->hash_code;
+		key_t cur_hash = cur->hash_code;
+		key_t cur_key = cur->key;
 
 		if (atomic_load (prev) != mk_node (get_node (cur), 0))
 			goto try_again;
 
 		if (!get_bit (next)) {
-			if (cur_key >= key)
+			if (cur_hash > hash_code || (cur_hash == hash_code && cur_key == key))
 				goto done;
 			prev = &get_node (cur)->next;
 		} else {
@@ -126,10 +127,11 @@ mark_ptr_t
 list_insert (mark_ptr_t *head, node_t *node)
 {
 	mark_ptr_t res, *prev;
-	key_t key = node->hash_code;
+	key_t key = node->key;
+	key_t hash_code = node->hash_code;
 
 	while (1) {
-		res = list_find (head, key, &prev);
+		res = list_find (head, key, hash_code, &prev);
 		if (res && res->hash_code == node->hash_code)
 			return res;
 		node->next = mk_node (get_node (res), 0);
@@ -139,12 +141,12 @@ list_insert (mark_ptr_t *head, node_t *node)
 }
 
 int
-list_delete (mark_ptr_t *head, key_t key)
+list_delete (mark_ptr_t *head, key_t key, key_t hash_code)
 {
 	mark_ptr_t res, *prev, next;
 	while (1) {
-		res = list_find (head, key, &prev);
-		if (!res || res->hash_code != key)
+		res = list_find (head, key, hash_code, &prev);
+		if (!res || res->hash_code != hash_code || res->key != key)
 			return FALSE;
 		next = atomic_load (&get_node (res)->next);
 		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
@@ -152,7 +154,7 @@ list_delete (mark_ptr_t *head, key_t key)
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
 			delete_node (get_node (res));
 		else
-			list_find (head, key, &prev);
+			list_find (head, key, hash_code, &prev);
 		return TRUE;
 	}
 }
@@ -238,7 +240,7 @@ find (conc_hashtable_t *ht, key_t key)
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
-	res = list_find (&ht->table [bucket], hash, &prev);
+	res = list_find (&ht->table [bucket], key, hash, &prev);
 	return res && get_node (res)->hash_code == hash;
 }
 
@@ -252,7 +254,7 @@ delete (conc_hashtable_t *ht, key_t key)
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
-	if (!list_delete (&ht->table [bucket], hash))
+	if (!list_delete (&ht->table [bucket], key, hash))
 		return FALSE;
 
 	atomic_fetch_and_dec (&ht->count);
