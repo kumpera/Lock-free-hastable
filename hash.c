@@ -9,7 +9,8 @@
 #define FALSE 0
 
 #define UNINITIALIZED (NULL)
-typedef unsigned int key_t;
+typedef unsigned int hash_t;
+typedef void* key_t;
 
 #define LOAD_FACTOR 0.75f
 
@@ -19,8 +20,9 @@ typedef node_t* mark_ptr_t;
 
 struct _node {
 	mark_ptr_t next;
-	key_t hash_code;
-	key_t key, value;
+	hash_t hash_code;
+	key_t key;
+	void *value;
 };
 
 typedef struct {
@@ -29,26 +31,32 @@ typedef struct {
 } conc_hashtable_t;
 
 /*FIXME, make this use a table*/
-static key_t
-reverse_value (key_t k)
+static hash_t
+reverse_value (hash_t k)
 {
 	int i;
-	key_t r = 0;
+	hash_t r = 0;
 	for (i = 0; i < 32; ++i) {
-		key_t bit = (k & (1 << i)) >> i;
+		hash_t bit = (k & (1 << i)) >> i;
 		r |= bit << (31 - i);
 	}
 	return r;
 }
 
-static inline key_t
-hash_regular_key (key_t k)
+static inline hash_t
+hash_key (key_t key)
+{
+	return (hash_t)(uintptr_t)key;
+}
+
+static inline hash_t
+hash_regular_key (hash_t k)
 {
 	return reverse_value (k | 0x80000000);
 }
 
-static inline key_t
-hash_dummy_key (key_t k)
+static inline hash_t
+hash_dummy_key (hash_t k)
 {
 	return reverse_value (k & ~0x80000000);
 }
@@ -90,7 +98,7 @@ delete_node (mark_ptr_t node)
 }
 
 mark_ptr_t
-list_find (mark_ptr_t *head, key_t key, key_t hash_code, mark_ptr_t **out_prev)
+list_find (mark_ptr_t *head, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
 {
 	mark_ptr_t cur, next, *prev;
 try_again:
@@ -100,7 +108,7 @@ try_again:
 		if (cur == NULL)
 			goto done;
 		next = cur->next;
-		key_t cur_hash = cur->hash_code;
+		hash_t cur_hash = cur->hash_code;
 		key_t cur_key = cur->key;
 
 		if (atomic_load (prev) != mk_node (get_node (cur), 0))
@@ -109,6 +117,7 @@ try_again:
 		if (!get_bit (next)) {
 			if (cur_hash > hash_code || (cur_hash == hash_code && cur_key == key))
 				goto done;
+
 			prev = &get_node (cur)->next;
 		} else {
 			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
@@ -128,11 +137,11 @@ list_insert (mark_ptr_t *head, node_t *node)
 {
 	mark_ptr_t res, *prev;
 	key_t key = node->key;
-	key_t hash_code = node->hash_code;
+	hash_t hash_code = node->hash_code;
 
 	while (1) {
 		res = list_find (head, key, hash_code, &prev);
-		if (res && res->hash_code == node->hash_code)
+		if (res && res->hash_code == node->hash_code && res->key == node->key)
 			return res;
 		node->next = mk_node (get_node (res), 0);
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
@@ -141,7 +150,7 @@ list_insert (mark_ptr_t *head, node_t *node)
 }
 
 int
-list_delete (mark_ptr_t *head, key_t key, key_t hash_code)
+list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 {
 	mark_ptr_t res, *prev, next;
 	while (1) {
@@ -178,8 +187,8 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 	if (atomic_load (&table [parent]) == UNINITIALIZED)
 		initialize_bucket (ht, table, parent);
 
-	node_t *node = calloc (sizeof (node), 1);
-	node->key = bucket;
+	node_t *node = calloc (sizeof (node_t), 1);
+	node->key = (key_t)(uintptr_t)bucket;
 	node->hash_code = hash_dummy_key (bucket);
 
 	res = list_insert (&table [parent], node);
@@ -208,12 +217,14 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 static int /*BOOL*/
 insert (conc_hashtable_t *ht, key_t key)
 {
-	node_t *node = calloc (sizeof (node), 1);
-	node->key = key;
-	node->hash_code = hash_regular_key (key);
+	hash_t hash = hash_key (key);
+	node_t *node = calloc (sizeof (node_t), 1);
 	mark_ptr_t *table = atomic_load (&ht->table);
 
-	unsigned bucket = node->hash_code % ht->size;
+	node->key = key;
+	node->hash_code = hash_regular_key (hash);
+
+	unsigned bucket = hash % ht->size;
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
@@ -233,13 +244,14 @@ static int
 find (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
-	key_t hash = hash_regular_key (key);
+	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = atomic_load (&ht->table);
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
+	hash = hash_regular_key (hash);
 	res = list_find (&ht->table [bucket], key, hash, &prev);
 	return res && get_node (res)->hash_code == hash;
 }
@@ -247,18 +259,34 @@ find (conc_hashtable_t *ht, key_t key)
 static int
 delete (conc_hashtable_t *ht, key_t key)
 {
-	key_t hash = hash_regular_key (key);
+	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = atomic_load (&ht->table);
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
+	hash = hash_regular_key (hash);
 	if (!list_delete (&ht->table [bucket], key, hash))
 		return FALSE;
 
 	atomic_fetch_and_dec (&ht->count);
 	return TRUE;
+}
+
+static void
+dump_hash (conc_hashtable_t *ht)
+{
+	int i;
+	node_t *cur = ht->table [0];
+	printf ("---------\n");
+	for (i = 0; i < ht->size; ++i)
+		if (ht->table [i]) printf ("root [%d] -> %p\n", i, ht->table [i]);
+	while (cur) {
+		printf ("node %p hash %08x key %p\n", cur, cur->hash_code, (void*)(uintptr_t)cur->key);
+		cur = cur->next;
+	}
+	printf ("---------\n");
 }
 
 conc_hashtable_t*
@@ -269,6 +297,8 @@ create (void)
 	res->table = calloc (sizeof (node_t), 16);
 	res->table [0] = calloc (sizeof (node_t), 1);
 	res->table [0]->hash_code = hash_dummy_key (0);
+	res->table [0]->key = (key_t)(uintptr_t)0;
+	printf ("root node %p\n", res->table [0]);
 	return res;
 }
 
@@ -276,7 +306,7 @@ static conc_hashtable_t *_ht;
 
 #define INSERT_CNT 1000000
 static void*
-async_insert (void *arg)
+async_insert (key_t arg)
 {
 	int base = INSERT_CNT * (int)(intptr_t)arg;
 	int i;
@@ -302,17 +332,31 @@ int main ()
 	printf ("elements in %d\n", _ht->count);*/
 
 	conc_hashtable_t *ht = create ();
-	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
 	insert (ht, 0);
+	insert (ht, 1);
+	insert (ht, 2);
+	insert (ht, 3);
+	insert (ht, 17);
+	insert (ht, 18);
+	dump_hash (ht);
+
+/*	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
+
+	insert (ht, 0);
+//	dump_hash (ht);
+
 	insert (ht, 26);
-	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
+//	dump_hash (ht);
+
+	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
 	delete (ht, 0);
-	printf ("find %d %d\n", find (ht, 0), find (ht, 10));
+	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
 	
 	printf ("%d ", insert (ht, 5));
 	printf ("%d ", insert (ht, 5));
 	printf ("%d ", insert (ht, 5));
 	printf ("%d\n", ht->count);
+//	dump_hash (ht);*/
 
 	/*
 	for (i = 0; i < 50; ++i)
