@@ -11,6 +11,11 @@
 #define UNINITIALIZED (NULL)
 typedef unsigned int hash_t;
 typedef void* key_t;
+typedef void* value_t;
+typedef int boolean;
+
+#define PTR_TO_UINT(p) ((unsigned)(uintptr_t)p)
+#define UINT_TO_PTR(p) ((void*)(uintptr_t)p)
 
 #define LOAD_FACTOR 0.75f
 
@@ -22,7 +27,7 @@ struct _node {
 	mark_ptr_t next;
 	hash_t hash_code;
 	key_t key;
-	void *value;
+	value_t value;
 };
 
 typedef struct {
@@ -149,14 +154,14 @@ list_insert (mark_ptr_t *head, node_t *node)
 	}
 }
 
-static int
+static mark_ptr_t
 list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 {
 	mark_ptr_t res, *prev, next;
 	while (1) {
 		res = list_find (head, key, hash_code, &prev);
 		if (!res || res->hash_code != hash_code || res->key != key)
-			return FALSE;
+			return NULL;
 		next = atomic_load (&get_node (res)->next);
 		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
 			continue;
@@ -164,7 +169,7 @@ list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 			delete_node (get_node (res));
 		else
 			list_find (head, key, hash_code, &prev);
-		return TRUE;
+		return res;
 	}
 }
 
@@ -229,15 +234,16 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 		free (new_table);
 }
 
-int /*BOOL*/
-conc_hashtable_insert (conc_hashtable_t *ht, key_t key)
+boolean
+conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 {
 	hash_t hash = hash_key (key);
 	node_t *node = calloc (sizeof (node_t), 1);
 	mark_ptr_t *table = atomic_load (&ht->table);
 
-	node->key = key;
 	node->hash_code = hash_regular_key (hash);
+	node->key = key;
+	node->value = value;
 
 	unsigned bucket = hash % ht->size;
 
@@ -255,7 +261,7 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key)
 	return TRUE;
 }
 
-int
+value_t
 conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
@@ -268,12 +274,15 @@ conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 
 	hash = hash_regular_key (hash);
 	res = list_find (&ht->table [bucket], key, hash, &prev);
-	return res && get_node (res)->hash_code == hash;
+	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key)
+		return get_node (res)->value;
+	return NULL;
 }
 
-int
+value_t
 conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 {
+	mark_ptr_t res;
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = atomic_load (&ht->table);
@@ -282,11 +291,12 @@ conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 		initialize_bucket (ht, table, bucket);
 
 	hash = hash_regular_key (hash);
-	if (!list_delete (&ht->table [bucket], key, hash))
-		return FALSE;
+	res = list_delete (&ht->table [bucket], key, hash);
+	if (!res)
+		return NULL;
 
 	atomic_fetch_and_dec (&ht->count);
-	return TRUE;
+	return get_node (res)->value;
 }
 
 conc_hashtable_t*
@@ -310,8 +320,8 @@ async_insert (key_t arg)
 	int base = INSERT_CNT * (int)(intptr_t)arg;
 	int i;
 	for (i = 0; i < INSERT_CNT; ++i) {
-		conc_hashtable_insert (_ht, base + i);
-		conc_hashtable_insert (_ht, base + i - INSERT_CNT);
+		conc_hashtable_insert (_ht, UINT_TO_PTR (base + i), UINT_TO_PTR (1));
+		conc_hashtable_insert (_ht, UINT_TO_PTR (base + i - INSERT_CNT), UINT_TO_PTR (2));
 	}
 	return NULL;
 }
@@ -332,27 +342,30 @@ int main ()
 	
 	conc_hashtable_t *ht = conc_hashtable_create ();
 
-	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
+	printf ("find %p %p %p\n", 
+		conc_hashtable_find (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find (ht, UINT_TO_PTR (10)),
+		conc_hashtable_find (ht, UINT_TO_PTR (26)));
 
-	conc_hashtable_insert (ht, 0);
+	conc_hashtable_insert (ht, UINT_TO_PTR (0), UINT_TO_PTR (0x20));
+	conc_hashtable_insert (ht, UINT_TO_PTR (26), UINT_TO_PTR (0x30));
 
-	conc_hashtable_insert (ht, 26);
+	printf ("find %p %p %p\n", 
+		conc_hashtable_find (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find (ht, UINT_TO_PTR (10)),
+		conc_hashtable_find (ht, UINT_TO_PTR (26)));
 
-	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
-	conc_hashtable_delete (ht, 0);
-	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
+	conc_hashtable_delete (ht, UINT_TO_PTR (0));
+
+	printf ("find %p %p %p\n", 
+		conc_hashtable_find (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find (ht, UINT_TO_PTR (10)),
+		conc_hashtable_find (ht, UINT_TO_PTR (26)));
 	
-	printf ("%d ", conc_hashtable_insert (ht, 5));
-	printf ("%d ", conc_hashtable_insert (ht, 5));
-	printf ("%d ", conc_hashtable_insert (ht, 5));
+	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
+	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
+	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
 	printf ("%d\n", ht->count);
 
-
-	/*
-	for (i = 0; i < 50; ++i)
-		insert (ht, i);
-	for (i = 0; i < 50; ++i)
-		printf ("[%d] = %d\n", i, find (ht, i));
-	printf ("total %d\n", ht->count);*/
 	return 0;
 }
