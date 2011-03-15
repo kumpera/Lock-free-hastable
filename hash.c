@@ -97,7 +97,7 @@ delete_node (mark_ptr_t node)
 //	free (get_node (node));
 }
 
-mark_ptr_t
+static mark_ptr_t
 list_find (mark_ptr_t *head, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
 {
 	mark_ptr_t cur, next, *prev;
@@ -132,7 +132,7 @@ done:
 	return cur;
 }
 
-mark_ptr_t
+static mark_ptr_t
 list_insert (mark_ptr_t *head, node_t *node)
 {
 	mark_ptr_t res, *prev;
@@ -149,7 +149,7 @@ list_insert (mark_ptr_t *head, node_t *node)
 	}
 }
 
-int
+static int
 list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 {
 	mark_ptr_t res, *prev, next;
@@ -166,6 +166,21 @@ list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 			list_find (head, key, hash_code, &prev);
 		return TRUE;
 	}
+}
+
+static void
+dump_hash (conc_hashtable_t *ht)
+{
+	int i;
+	node_t *cur = ht->table [0];
+	printf ("---------\n");
+	for (i = 0; i < ht->size; ++i)
+		if (ht->table [i]) printf ("root [%d] -> %p\n", i, ht->table [i]);
+	while (cur) {
+		printf ("node %p hash %08x key %p\n", cur, cur->hash_code, (void*)(uintptr_t)cur->key);
+		cur = cur->next;
+	}
+	printf ("---------\n");
 }
 
 static unsigned
@@ -214,8 +229,8 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 		free (new_table);
 }
 
-static int /*BOOL*/
-insert (conc_hashtable_t *ht, key_t key)
+int /*BOOL*/
+conc_hashtable_insert (conc_hashtable_t *ht, key_t key)
 {
 	hash_t hash = hash_key (key);
 	node_t *node = calloc (sizeof (node_t), 1);
@@ -240,8 +255,8 @@ insert (conc_hashtable_t *ht, key_t key)
 	return TRUE;
 }
 
-static int
-find (conc_hashtable_t *ht, key_t key)
+int
+conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
 	hash_t hash = hash_key (key);
@@ -256,8 +271,8 @@ find (conc_hashtable_t *ht, key_t key)
 	return res && get_node (res)->hash_code == hash;
 }
 
-static int
-delete (conc_hashtable_t *ht, key_t key)
+int
+conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 {
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
@@ -274,23 +289,8 @@ delete (conc_hashtable_t *ht, key_t key)
 	return TRUE;
 }
 
-static void
-dump_hash (conc_hashtable_t *ht)
-{
-	int i;
-	node_t *cur = ht->table [0];
-	printf ("---------\n");
-	for (i = 0; i < ht->size; ++i)
-		if (ht->table [i]) printf ("root [%d] -> %p\n", i, ht->table [i]);
-	while (cur) {
-		printf ("node %p hash %08x key %p\n", cur, cur->hash_code, (void*)(uintptr_t)cur->key);
-		cur = cur->next;
-	}
-	printf ("---------\n");
-}
-
 conc_hashtable_t*
-create (void)
+conc_hashtable_create (void)
 {
 	conc_hashtable_t *res = calloc (sizeof (conc_hashtable_t), 1);
 	res->size = 16;
@@ -310,8 +310,8 @@ async_insert (key_t arg)
 	int base = INSERT_CNT * (int)(intptr_t)arg;
 	int i;
 	for (i = 0; i < INSERT_CNT; ++i) {
-		insert (_ht, base + i);
-		insert (_ht, base + i - INSERT_CNT);
+		conc_hashtable_insert (_ht, base + i);
+		conc_hashtable_insert (_ht, base + i - INSERT_CNT);
 	}
 	return NULL;
 }
@@ -330,21 +330,21 @@ int main ()
 
 	printf ("elements in %d\n", _ht->count);*/
 	
-	conc_hashtable_t *ht = create ();
+	conc_hashtable_t *ht = conc_hashtable_create ();
 
-	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
+	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
 
-	insert (ht, 0);
+	conc_hashtable_insert (ht, 0);
 
-	insert (ht, 26);
+	conc_hashtable_insert (ht, 26);
 
-	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
-	delete (ht, 0);
-	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
+	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
+	conc_hashtable_delete (ht, 0);
+	printf ("find %d %d %d\n", conc_hashtable_find (ht, 0), conc_hashtable_find (ht, 10), conc_hashtable_find (ht, 26));
 	
-	printf ("%d ", insert (ht, 5));
-	printf ("%d ", insert (ht, 5));
-	printf ("%d ", insert (ht, 5));
+	printf ("%d ", conc_hashtable_insert (ht, 5));
+	printf ("%d ", conc_hashtable_insert (ht, 5));
+	printf ("%d ", conc_hashtable_insert (ht, 5));
 	printf ("%d\n", ht->count);
 
 
