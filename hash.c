@@ -46,7 +46,7 @@ reverse_value (hash_t k)
 static inline hash_t
 hash_key (key_t key)
 {
-	return (hash_t)(uintptr_t)key;
+	return (hash_t)((uintptr_t)(key) * 2654435761u);
 }
 
 static inline hash_t
@@ -298,7 +298,6 @@ create (void)
 	res->table [0] = calloc (sizeof (node_t), 1);
 	res->table [0]->hash_code = hash_dummy_key (0);
 	res->table [0]->key = (key_t)(uintptr_t)0;
-	printf ("root node %p\n", res->table [0]);
 	return res;
 }
 
@@ -330,23 +329,14 @@ int main ()
 		pthread_join (threads [i], NULL);
 
 	printf ("elements in %d\n", _ht->count);*/
-
+	
 	conc_hashtable_t *ht = create ();
-	insert (ht, 0);
-	insert (ht, 1);
-	insert (ht, 2);
-	insert (ht, 3);
-	insert (ht, 17);
-	insert (ht, 18);
-	dump_hash (ht);
 
-/*	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
+	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
 
 	insert (ht, 0);
-//	dump_hash (ht);
 
 	insert (ht, 26);
-//	dump_hash (ht);
 
 	printf ("find %d %d %d\n", find (ht, 0), find (ht, 10), find (ht, 26));
 	delete (ht, 0);
@@ -356,7 +346,7 @@ int main ()
 	printf ("%d ", insert (ht, 5));
 	printf ("%d ", insert (ht, 5));
 	printf ("%d\n", ht->count);
-//	dump_hash (ht);*/
+
 
 	/*
 	for (i = 0; i < 50; ++i)
