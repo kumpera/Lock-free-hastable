@@ -210,58 +210,6 @@ done:
 	return cur;
 }
 
-static mark_ptr_t
-list_find (mark_ptr_t *head, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
-{
-	mark_ptr_t cur, next, *prev;
-try_again:
-	prev = head;
-	cur = atomic_load (prev);
-	while (1) {
-		if (cur == NULL)
-			goto done;
-		next = cur->next;
-		hash_t cur_hash = cur->hash_code;
-		key_t cur_key = cur->key;
-
-		if (atomic_load (prev) != mk_node (get_node (cur), 0))
-			goto try_again;
-
-		if (!get_bit (next)) {
-			if (cur_hash > hash_code || (cur_hash == hash_code && cur_key == key))
-				goto done;
-
-			prev = &get_node (cur)->next;
-		} else {
-			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
-				delete_node (get_node (cur));
-			else
-				goto try_again;
-		}
-		cur = next;
-	}
-done:
-	*out_prev = prev;
-	return cur;
-}
-
-static mark_ptr_t
-list_insert (mark_ptr_t *head, node_t *node)
-{
-	mark_ptr_t res, *prev;
-	key_t key = node->key;
-	hash_t hash_code = node->hash_code;
-
-	while (1) {
-		res = list_find (head, key, hash_code, &prev);
-		if (res && res->hash_code == node->hash_code && res->key == node->key)
-			return res;
-		node->next = mk_node (get_node (res), 0);
-		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
-			return node;
-	}
-}
-
 /*
 LOCKING:
 
@@ -333,29 +281,10 @@ list_delete_hp (conc_hashtable_t *ht, unsigned bucket, key_t key, hash_t hash_co
 	}
 }
 
-static mark_ptr_t
-list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
-{
-	mark_ptr_t res, *prev, next;
-	while (1) {
-		res = list_find (head, key, hash_code, &prev);
-		if (!res || res->hash_code != hash_code || res->key != key)
-			return NULL;
-		next = atomic_load (&get_node (res)->next);
-		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
-			continue;
-		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
-			delete_node (get_node (res));
-		else
-			list_find (head, key, hash_code, &prev);
-		return res;
-	}
-}
-
 /*
 LOCKING:
 
-Assume no concurrent accesss.
+Assumes no concurrent accesss.
 
 */
 static void
@@ -421,6 +350,8 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 }
 
 /*
+LOCKING:
+
 On entry:
 	HP 0/1/2 can be any value
 
@@ -562,9 +493,10 @@ conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 }
 
 conc_hashtable_t*
-conc_hashtable_create (void)
+conc_hashtable_create (gboolean lock_value)
 {
 	conc_hashtable_t *res = calloc (sizeof (conc_hashtable_t), 1);
+	res->lock_value = lock_value;
 	res->size = 16;
 	res->table = calloc (sizeof (node_t), 16);
 	res->table [0] = calloc (sizeof (node_t), 1);
@@ -606,7 +538,7 @@ int main ()
 	printf ("elements in %d\n", _ht->count);*/
 
 
-	conc_hashtable_t *ht = conc_hashtable_create ();
+	conc_hashtable_t *ht = conc_hashtable_create (FALSE);
 
 	printf ("find %p %p %p\n", 
 		conc_hashtable_find (ht, UINT_TO_PTR (0)),
