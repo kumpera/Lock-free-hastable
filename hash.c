@@ -12,7 +12,7 @@
 typedef unsigned int hash_t;
 typedef void* key_t;
 typedef void* value_t;
-typedef int boolean;
+typedef int gboolean;
 
 typedef void* gpointer;
 #define PTR_TO_UINT(p) ((unsigned)(uintptr_t)p)
@@ -34,6 +34,7 @@ struct _node {
 typedef struct {
 	mark_ptr_t *table;
 	unsigned count, size;
+	gboolean lock_value;	
 } conc_hashtable_t;
 
 /*FIXME, make this use a table*/
@@ -380,7 +381,7 @@ On Insert:
 On Exit:
 	HP 0/1/2 are clear
 */
-boolean
+gboolean
 conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 {
 	hash_t hash = hash_key (key);
@@ -395,6 +396,7 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
+
 	if (get_node (list_insert_hp (ht, bucket, node)) != node) {
 		free (node);
 		clear_hazardous_pointers ();
@@ -408,21 +410,43 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 	return TRUE;
 }
 
+/*
+LOCKING:
+
+On Insert:
+	HP 0/1/2 must not be in used
+
+On Exit:
+	if ht->lock_value
+		(value, null, null)
+	else
+		HP 0/1/2 clear
+*/
 value_t
 conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
-	mark_ptr_t *table = atomic_load (&ht->table);
+	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
 	hash = hash_regular_key (hash);
-	res = list_find (&ht->table [bucket], key, hash, &prev);
-	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key)
-		return get_node (res)->value;
+	res = list_find_hp (ht, bucket, key, hash, &prev);
+	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key) {
+		value_t val = NULL;
+		if (ht->lock_value) {
+			value_t val = get_hazardous_pointer (&get_node (res)->value, 0);
+			clear_hazardous_pointer (1);
+			clear_hazardous_pointer (2);
+		} else {
+			val = get_node (res)->value;
+			clear_hazardous_pointers ();
+		}
+		return val;
+	}
 	return NULL;
 }
 
