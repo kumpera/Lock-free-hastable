@@ -74,25 +74,29 @@ hash_dummy_key (hash_t k)
 #define store_barrier __builtin_ia32_sfence
 #define memory_barrier __builtin_ia32_mfence
 
+#define CH_TABLE_INDEX	0
+
+
+
 #define atomic_load(p)  ({ load_barrier (), *(p); })
 #define atomic_store(p, v) do { store_barrier (); *(p) = v; } while (0);
 
 static inline mark_ptr_t
 mk_node (node_t *n, uintptr_t bit)
 {
-	return  (mark_ptr_t)(((uintptr_t)n) | bit);
+	return (mark_ptr_t)(((uintptr_t)n) | bit);
 }
 
 static inline node_t*
 get_node (mark_ptr_t n)
 {
-	return  (node_t*)(((uintptr_t)n) & ~(uintptr_t)0x1);
+	return (node_t*)(((uintptr_t)n) & ~(uintptr_t)0x1);
 }
 
 static inline uintptr_t
 get_bit (mark_ptr_t n)
 {
-	return  (uintptr_t)n & 0x1;
+	return (uintptr_t)n & 0x1;
 }
 
 static void
@@ -100,6 +104,70 @@ delete_node (mark_ptr_t node)
 {
 	assert (get_bit (node) == 0);
 //	free (get_node (node));
+}
+
+static gpointer
+get_hazardous_pointer (gpointer *pp, int hazard_index)
+{
+	return *pp;
+}
+
+static void
+clear_hazardous_pointer (int hazard_index)
+{
+	
+}
+
+/*
+LOCKING:
+On Entry:
+	HP 0/1/2 should be available
+On Exit:
+if res == null
+	(null, null, prev)
+else
+	(next, cur,  prev)
+*/
+static mark_ptr_t
+list_find_hp (conc_hash_table_t *ht, unsigned bucket, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
+{
+	mark_ptr_t *table;
+	mark_ptr_t cur, next, *prev;
+
+
+try_again:
+	table = get_hazardous_pointer (&ht->table, 0);
+	mark_ptr_t *head = &table [bucket];
+	prev = head;
+	cur = get_hazardous_pointer (prev, 1);
+	while (1) {
+		if (cur == NULL)
+			goto done;
+		next = get_hazardous_pointer (&cur->next, 0);
+		hash_t cur_hash = cur->hash_code;
+		key_t cur_key = cur->key;
+
+		if (atomic_load (prev) != mk_node (get_node (cur), 0))
+			goto try_again;
+
+		if (!get_bit (next)) {
+			if (cur_hash > hash_code || (cur_hash == hash_code && cur_key == key))
+				goto done;
+
+			prev = &get_node (cur)->next;
+			set_hazardous_pointer (cur, 2);
+		} else {
+			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
+				delete_node (get_node (cur));
+			else
+				goto try_again;
+		}
+		cur = next;
+		set_hazardous_pointer (cur, 2);
+	}
+done:
+	*out_prev = prev;
+	return cur;
 }
 
 static mark_ptr_t
@@ -154,6 +222,29 @@ list_insert (mark_ptr_t *head, node_t *node)
 	}
 }
 
+/*
+LOCKING:
+
+On Entry:
+	HP 0/1/2 are available
+*/
+static mark_ptr_t
+list_insert_hp (conc_hash_table_t *ht, unsigned bucket, node_t *node)
+{
+	mark_ptr_t res, *prev;
+	key_t key = node->key;
+	hash_t hash_code = node->hash_code;
+
+	while (1) {
+		res = list_find_hp (ht, bucket, key, hash_code, &prev);
+		if (res && res->hash_code == node->hash_code && res->key == node->key)
+			return res;
+		node->next = mk_node (get_node (res), 0);
+		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
+			return node;
+	}
+}
+
 static mark_ptr_t
 list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 {
@@ -199,11 +290,19 @@ get_parent (unsigned b)
 	return 0;
 }
 
+/*
+LOCKING:
+
+On entry:
+	table must be held on HP 0
+
+*/
 static void
 initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 {
 	mark_ptr_t res;
 	unsigned parent = get_parent (bucket);
+	/*This is protected by the non recursive caller HP*/
 	if (atomic_load (&table [parent]) == UNINITIALIZED)
 		initialize_bucket (ht, table, parent);
 
@@ -211,12 +310,14 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 	node->key = (key_t)(uintptr_t)bucket;
 	node->hash_code = hash_dummy_key (bucket);
 
-	res = list_insert (&table [parent], node);
+	res = list_insert_hp (ht, parent, node);
 	if (get_node (res) != node) {
 		free (node);
 		node = get_node (res);
 	}
 
+	/*we need to reload it since the previous HP is no longer valid*/
+	table = get_hazardous_pointer (&ht->table, 0);
 	atomic_store (&table [bucket], mk_node (node, 0));
 }
 
@@ -239,7 +340,7 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 {
 	hash_t hash = hash_key (key);
 	node_t *node = calloc (sizeof (node_t), 1);
-	mark_ptr_t *table = atomic_load (&ht->table);
+	mark_ptr_t *table = get_hazardous_pointer (&ht->table, 0);
 
 	node->hash_code = hash_regular_key (hash);
 	node->key = key;
