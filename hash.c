@@ -14,6 +14,7 @@ typedef void* key_t;
 typedef void* value_t;
 typedef int boolean;
 
+typedef void* gpointer;
 #define PTR_TO_UINT(p) ((unsigned)(uintptr_t)p)
 #define UINT_TO_PTR(p) ((void*)(uintptr_t)p)
 
@@ -118,6 +119,12 @@ clear_hazardous_pointer (int hazard_index)
 	
 }
 
+static void
+set_hazardous_pointer (gpointer pp, int hazard_index)
+{
+	
+}
+
 /*
 LOCKING:
 On Entry:
@@ -127,23 +134,24 @@ if res == null
 	(null, null, prev)
 else
 	(next, cur,  prev)
+Return value:
+	cur
 */
 static mark_ptr_t
-list_find_hp (conc_hash_table_t *ht, unsigned bucket, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
+list_find_hp (conc_hashtable_t *ht, unsigned bucket, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
 {
 	mark_ptr_t *table;
 	mark_ptr_t cur, next, *prev;
 
-
 try_again:
-	table = get_hazardous_pointer (&ht->table, 0);
+	table = get_hazardous_pointer ((void**)&ht->table, 0);
 	mark_ptr_t *head = &table [bucket];
 	prev = head;
-	cur = get_hazardous_pointer (prev, 1);
+	cur = get_hazardous_pointer ((void**)prev, 1);
 	while (1) {
 		if (cur == NULL)
 			goto done;
-		next = get_hazardous_pointer (&cur->next, 0);
+		next = get_hazardous_pointer ((void**)&cur->next, 0);
 		hash_t cur_hash = cur->hash_code;
 		key_t cur_key = cur->key;
 
@@ -227,9 +235,18 @@ LOCKING:
 
 On Entry:
 	HP 0/1/2 are available
+
+On exit:
+if res == node
+	(next, cur, prev)
+else
+	(node, cur, prev) *cur might be null
+
+Return:
+	eithee the new node or the exiting one 
 */
 static mark_ptr_t
-list_insert_hp (conc_hash_table_t *ht, unsigned bucket, node_t *node)
+list_insert_hp (conc_hashtable_t *ht, unsigned bucket, node_t *node)
 {
 	mark_ptr_t res, *prev;
 	key_t key = node->key;
@@ -240,6 +257,7 @@ list_insert_hp (conc_hash_table_t *ht, unsigned bucket, node_t *node)
 		if (res && res->hash_code == node->hash_code && res->key == node->key)
 			return res;
 		node->next = mk_node (get_node (res), 0);
+		set_hazardous_pointer (node, 0);		
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
 			return node;
 	}
@@ -296,6 +314,9 @@ LOCKING:
 On entry:
 	table must be held on HP 0
 
+On exit:
+	(node, table, prev)
+
 */
 static void
 initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
@@ -316,15 +337,24 @@ initialize_bucket (conc_hashtable_t *ht, mark_ptr_t *table, unsigned bucket)
 		node = get_node (res);
 	}
 
-	/*we need to reload it since the previous HP is no longer valid*/
-	table = get_hazardous_pointer (&ht->table, 0);
+	/*we need to reload it since the previous HP is no longer valid
+	HP 0 hold node, so we must use 1 or 2
+	*/
+	table = get_hazardous_pointer ((void**)&ht->table, 1);
 	atomic_store (&table [bucket], mk_node (node, 0));
 }
 
+/*
+On entry:
+	HP 0/1/2 can be any value
+
+On exit:
+	HP 0 holds table. HP 1/2 unchanged
+*/
 static void
 resize_table (conc_hashtable_t *ht, unsigned size)
 {
-	node_t **old_table = ht->table;
+	node_t **old_table = get_hazardous_pointer ((void**)&ht->table, 0);
 	node_t **new_table = calloc (sizeof (node_t*), size * 2);
 	memcpy (new_table, old_table, sizeof (node_t*) * size);
 	if (!atomic_compare_and_swap (&ht->size, size, size * 2)) {
@@ -340,7 +370,7 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 {
 	hash_t hash = hash_key (key);
 	node_t *node = calloc (sizeof (node_t), 1);
-	mark_ptr_t *table = get_hazardous_pointer (&ht->table, 0);
+	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
 
 	node->hash_code = hash_regular_key (hash);
 	node->key = key;
