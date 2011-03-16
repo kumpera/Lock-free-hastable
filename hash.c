@@ -157,6 +157,8 @@ get_current_hazardous_pointer (int hazard_index)
 {
 	return get_hazard_table () [hazard_index];
 }
+
+////////////////////////////////////////////
 /*
 LOCKING:
 On Entry:
@@ -203,7 +205,62 @@ try_again:
 				goto try_again;
 		}
 		cur = next;
+		set_hazardous_pointer (next, 1);
+	}
+done:
+	*out_prev = prev;
+	return cur;
+}
+
+/*
+This function doesn't perform any delete, so use it with care. 
+
+LOCKING:
+On Entry:
+	HP 0/1/2 should be available
+On Exit:
+if res == null
+	(null, null, prev)
+else
+	(next, cur,  prev)
+Return value:
+	cur
+*/
+static mark_ptr_t
+list_find_signal_safe_hp (conc_hashtable_t *ht, unsigned bucket, key_t key, hash_t hash_code, mark_ptr_t **out_prev)
+{
+	mark_ptr_t *table;
+	mark_ptr_t cur, next, *prev;
+	gboolean deleted = FALSE;
+
+try_again:
+	table = get_hazardous_pointer ((void**)&ht->table, 0);
+	mark_ptr_t *head = &table [bucket];
+	prev = head;
+	cur = get_hazardous_pointer ((void**)prev, 1);
+	while (1) {
+		if (cur == NULL)
+			goto done;
+		next = get_hazardous_pointer ((void**)&cur->next, 0);
+		hash_t cur_hash = cur->hash_code;
+		key_t cur_key = cur->key;
+
+		if (atomic_load (prev) != mk_node (get_node (cur), 0))
+			goto try_again;
+
+		if (cur_hash > hash_code || (cur_hash == hash_code && cur_key == key)) {
+			if (deleted)
+				cur = NULL;
+			goto done;
+		}
+
+		deleted = get_bit (next) != 0;
+
+		prev = &get_node (cur)->next;
 		set_hazardous_pointer (cur, 2);
+
+		cur = next;
+		set_hazardous_pointer (next, 1);
 	}
 done:
 	*out_prev = prev;
@@ -435,6 +492,49 @@ conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 
 	hash = hash_regular_key (hash);
 	res = list_find_hp (ht, bucket, key, hash, &prev);
+	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key) {
+		value_t val = NULL;
+		if (ht->lock_value) {
+			value_t val = get_hazardous_pointer (&get_node (res)->value, 0);
+			clear_hazardous_pointer (1);
+			clear_hazardous_pointer (2);
+		} else {
+			val = get_node (res)->value;
+			clear_hazardous_pointers ();
+		}
+		return val;
+	}
+	return NULL;
+}
+
+/*
+This function does the same as conc_hashtable_find
+except it doesn't delete nodes since it must be signal safe.
+
+LOCKING:
+
+On Entry:
+	HP 0/1/2 must not be in used
+
+On Exit:
+	if ht->lock_value
+		(value, null, null)
+	else
+		HP 0/1/2 clear
+*/
+value_t
+conc_hashtable_find_signal_safe (conc_hashtable_t *ht, key_t key)
+{
+	mark_ptr_t res, *prev;
+	hash_t hash = hash_key (key);
+	unsigned bucket = hash % ht->size;
+	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
+
+	while (table [bucket] == UNINITIALIZED && bucket != 0)
+		bucket = get_parent (bucket);
+
+	hash = hash_regular_key (hash);
+	res = list_find_signal_safe_hp (ht, bucket, key, hash, &prev);
 	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key) {
 		value_t val = NULL;
 		if (ht->lock_value) {
