@@ -108,30 +108,55 @@ delete_node (mark_ptr_t node)
 //	free (get_node (node));
 }
 
+/*Dummy implementation of hazzard pointers */
+
+pthread_key_t hazard_pointer;
+
+static gpointer*
+get_hazard_table (void)
+{
+	gpointer *tb = pthread_getspecific (hazard_pointer);
+	if (!tb) {
+		tb = calloc (sizeof (gpointer), 3);
+		pthread_setspecific (hazard_pointer, tb);
+	}
+	return tb;
+}
+
 static gpointer
 get_hazardous_pointer (gpointer *pp, int hazard_index)
 {
-	return *pp;
+	gpointer res = *pp;
+	get_hazard_table () [hazard_index] = res;
+	return res;
 }
 
 static void
 clear_hazardous_pointer (int hazard_index)
 {
-	
+	get_hazard_table () [hazard_index] = NULL;
 }
 
 static void
 set_hazardous_pointer (gpointer pp, int hazard_index)
 {
-	
+	get_hazard_table () [hazard_index] = pp;
 }
 
 static void
 clear_hazardous_pointers (void)
 {
-	
+	gpointer *tb = get_hazard_table ();
+	tb [0] = NULL;
+	tb [1] = NULL;
+	tb [2] = NULL;	
 }
 
+static void*
+get_current_hazardous_pointer (int hazard_index)
+{
+	return get_hazard_table () [hazard_index];
+}
 /*
 LOCKING:
 On Entry:
@@ -250,7 +275,7 @@ else
 	(node, cur, prev) *cur might be null
 
 Return:
-	eithee the new node or the exiting one 
+	either the new node or the exiting one 
 */
 static mark_ptr_t
 list_insert_hp (conc_hashtable_t *ht, unsigned bucket, node_t *node)
@@ -267,6 +292,44 @@ list_insert_hp (conc_hashtable_t *ht, unsigned bucket, node_t *node)
 		set_hazardous_pointer (node, 0);		
 		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (node, 0)))
 			return node;
+	}
+}
+
+/*
+LOCKING:
+
+On Entry:
+	HP 0/1/2 are available
+
+On exit:
+	(?, res, ?) *res might be null
+
+Return:
+	either null or the deleted node.
+*/
+static mark_ptr_t
+list_delete_hp (conc_hashtable_t *ht, unsigned bucket, key_t key, hash_t hash_code)
+{
+	mark_ptr_t res, *prev, next;
+	while (1) {
+		res = list_find_hp (ht, bucket, key, hash_code, &prev);
+		if (!res || res->hash_code != hash_code || res->key != key)
+			return NULL;
+
+		next = get_current_hazardous_pointer (0);
+		if (!atomic_compare_and_swap (&get_node (res)->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1)))
+			continue;
+		if (atomic_compare_and_swap (prev, mk_node (get_node (res), 0), mk_node (get_node (next), 0)))
+			delete_node (get_node (res));
+		/* XXX
+		 * We must deviate from the standard algorithm here otherwise we won't be able to hold a HP
+		 * to res otherwise. Not doing the find here means that it will take longer for the list to converge
+		 * to a state with no deleted nodes. The degenerated case will have dead nodes that are not deleted
+		 * because they are never traversed. If this turns out to be a problem the solution is to have a 4th HP. 
+		 */
+		//else
+		//	list_find_hp (ht, bucket, key, hash_code, &prev);
+		return res;
 	}
 }
 
@@ -289,6 +352,12 @@ list_delete (mark_ptr_t *head, key_t key, hash_t hash_code)
 	}
 }
 
+/*
+LOCKING:
+
+Assume no concurrent accesss.
+
+*/
 static void
 dump_hash (conc_hashtable_t *ht)
 {
@@ -375,7 +444,7 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 /*
 LOCKING:
 
-On Insert:
+On Entry:
 	HP 0/1/2 must not be in used
 
 On Exit:
@@ -413,7 +482,7 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 /*
 LOCKING:
 
-On Insert:
+On Entry:
 	HP 0/1/2 must not be in used
 
 On Exit:
@@ -450,24 +519,46 @@ conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 	return NULL;
 }
 
+/*
+LOCKING:
+
+On Entry:
+	HP 0/1/2 must not be in used
+
+On Exit:
+	if ht->lock_value
+		(value, null, null)
+	else
+		HP 0/1/2 clear
+*/
 value_t
 conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res;
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
-	mark_ptr_t *table = atomic_load (&ht->table);
+	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
+	value_t value;
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
 
 	hash = hash_regular_key (hash);
-	res = list_delete (&ht->table [bucket], key, hash);
+	res = list_delete_hp (ht, bucket, key, hash);
 	if (!res)
 		return NULL;
 
 	atomic_fetch_and_dec (&ht->count);
-	return get_node (res)->value;
+
+	if (ht->lock_value) {
+		value = get_hazardous_pointer (&get_node (res)->value, 0);
+		clear_hazardous_pointer (1);
+		clear_hazardous_pointer (2);
+	} else {
+		value = get_node (res)->value;
+		clear_hazardous_pointers ();
+	}
+	return value;
 }
 
 conc_hashtable_t*
@@ -500,6 +591,9 @@ async_insert (key_t arg)
 int main ()
 {
 	int i = 0;
+	pthread_key_create (&hazard_pointer, NULL);
+
+
 /*	_ht = create ();
 	pthread_t threads[4];
 
@@ -510,7 +604,8 @@ int main ()
 		pthread_join (threads [i], NULL);
 
 	printf ("elements in %d\n", _ht->count);*/
-	
+
+
 	conc_hashtable_t *ht = conc_hashtable_create ();
 
 	printf ("find %p %p %p\n", 
