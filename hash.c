@@ -578,7 +578,7 @@ conc_hashtable_find_signal_safe (conc_hashtable_t *ht, key_t key)
 	hash = hash_regular_key (hash);
 	res = list_find_signal_safe_hp (ht, bucket, key, hash, &prev);
 	res_node = get_node (res);
-	if (res_node && res_node->hash_code == hash && res_node->key == key) {
+	if (res_node && res_node->hash_code == hash && res_node->key == key && !get_bit (res->next)) {
 		value_t val = NULL;
 		if (ht->lock_value) {
 			value_t val = get_hazardous_pointer_with_mask (&res_node->value, 0);
@@ -741,7 +741,15 @@ int main ()
 	conc_hashtable_foreach_exclusive (ht, delete_odd_keys);
 	dump_hash (ht);
 
-	printf ("find %p %p %p %p %p\n", 
+	printf ("find_sf %p %p %p %p %p\n", 
+		conc_hashtable_find_signal_safe (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find_signal_safe (ht, UINT_TO_PTR (1)),
+		conc_hashtable_find_signal_safe (ht, UINT_TO_PTR (5)),
+		conc_hashtable_find_signal_safe (ht, UINT_TO_PTR (20)),
+		conc_hashtable_find_signal_safe (ht, UINT_TO_PTR (99)));
+
+
+	printf ("find_nm %p %p %p %p %p\n", 
 		conc_hashtable_find (ht, UINT_TO_PTR (0)),
 		conc_hashtable_find (ht, UINT_TO_PTR (1)),
 		conc_hashtable_find (ht, UINT_TO_PTR (5)),
