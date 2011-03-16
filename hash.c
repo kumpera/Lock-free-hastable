@@ -125,6 +125,12 @@ set_hazardous_pointer (gpointer pp, int hazard_index)
 	
 }
 
+static void
+clear_hazardous_pointers (void)
+{
+	
+}
+
 /*
 LOCKING:
 On Entry:
@@ -365,6 +371,15 @@ resize_table (conc_hashtable_t *ht, unsigned size)
 		free (new_table);
 }
 
+/*
+LOCKING:
+
+On Insert:
+	HP 0/1/2 must not be in used
+
+On Exit:
+	HP 0/1/2 are clear
+*/
 boolean
 conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 {
@@ -380,8 +395,9 @@ conc_hashtable_insert (conc_hashtable_t *ht, key_t key, value_t value)
 
 	if (table [bucket] == UNINITIALIZED)
 		initialize_bucket (ht, table, bucket);
-	if (get_node (list_insert (&table [bucket], node)) != node) {
+	if (get_node (list_insert_hp (ht, bucket, node)) != node) {
 		free (node);
+		clear_hazardous_pointers ();
 		return FALSE;
 	}
 
