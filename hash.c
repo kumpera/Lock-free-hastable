@@ -68,6 +68,18 @@ hash_dummy_key (hash_t k)
 	return reverse_value (k & ~0x80000000);
 }
 
+static gboolean
+is_dummy_node (hash_t k)
+{
+	return (k & 0x1) == 0;
+}
+
+static gboolean
+is_regular_node (hash_t k)
+{
+	return (k & 0x1) == 1;
+}
+
 #define atomic_fetch_and_inc(t) __sync_fetch_and_add (t, 1)
 #define atomic_fetch_and_dec(t) __sync_fetch_and_sub (t, 1)
 #define atomic_compare_and_swap(t,old,new) __sync_bool_compare_and_swap (t, old, new)
@@ -131,6 +143,26 @@ get_hazardous_pointer (gpointer *pp, int hazard_index)
 	return res;
 }
 
+/*Clean the bottom 2 bits*/
+static gpointer*
+unmask (gpointer* p)
+{
+	return (gpointer*)((uintptr_t)p & ~(uintptr_t)0x3);
+}
+
+/*
+Use this version of get_hazardous_pointer if either
+@pp or the value it points to might be masked.
+*/
+static gpointer
+get_hazardous_pointer_with_mask (gpointer *pp, int hazard_index)
+{
+	gpointer res = *unmask (pp);
+	get_hazard_table () [hazard_index] = unmask (res);
+	return res;
+}
+
+
 static void
 clear_hazardous_pointer (int hazard_index)
 {
@@ -141,6 +173,12 @@ static void
 set_hazardous_pointer (gpointer pp, int hazard_index)
 {
 	get_hazard_table () [hazard_index] = pp;
+}
+
+static void
+set_hazardous_pointer_with_mask (gpointer pp, int hazard_index)
+{
+	get_hazard_table () [hazard_index] = unmask (pp);
 }
 
 static void
@@ -183,9 +221,9 @@ try_again:
 	prev = head;
 	cur = get_hazardous_pointer ((void**)prev, 1);
 	while (1) {
-		if (cur == NULL)
+		if (get_node (cur) == NULL)
 			goto done;
-		next = get_hazardous_pointer ((void**)&cur->next, 0);
+		next = get_hazardous_pointer_with_mask ((void**)&cur->next, 0);
 		hash_t cur_hash = cur->hash_code;
 		key_t cur_key = cur->key;
 
@@ -197,7 +235,7 @@ try_again:
 				goto done;
 
 			prev = &get_node (cur)->next;
-			set_hazardous_pointer (cur, 2);
+			set_hazardous_pointer_with_mask (cur, 2);
 		} else {
 			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
 				delete_node (get_node (cur));
@@ -205,7 +243,8 @@ try_again:
 				goto try_again;
 		}
 		cur = next;
-		set_hazardous_pointer (next, 1);
+		printf ("next is %p\n", next);
+		set_hazardous_pointer_with_mask (next, 1);
 	}
 done:
 	*out_prev = prev;
@@ -241,7 +280,7 @@ try_again:
 	while (1) {
 		if (cur == NULL)
 			goto done;
-		next = get_hazardous_pointer ((void**)&cur->next, 0);
+		next = get_hazardous_pointer_with_mask ((void**)&cur->next, 0);
 		hash_t cur_hash = cur->hash_code;
 		key_t cur_key = cur->key;
 
@@ -257,10 +296,10 @@ try_again:
 		deleted = get_bit (next) != 0;
 
 		prev = &get_node (cur)->next;
-		set_hazardous_pointer (cur, 2);
+		set_hazardous_pointer_with_mask (cur, 2);
 
 		cur = next;
-		set_hazardous_pointer (next, 1);
+		set_hazardous_pointer_with_mask (next, 1);
 	}
 done:
 	*out_prev = prev;
@@ -348,13 +387,13 @@ static void
 dump_hash (conc_hashtable_t *ht)
 {
 	int i;
-	node_t *cur = ht->table [0];
+	node_t *cur = get_node (ht->table [0]);
 	printf ("---------\n");
 	for (i = 0; i < ht->size; ++i)
 		if (ht->table [i]) printf ("root [%d] -> %p\n", i, ht->table [i]);
 	while (cur) {
-		printf ("node %p hash %08x key %p\n", cur, cur->hash_code, (void*)(uintptr_t)cur->key);
-		cur = cur->next;
+		printf ("node %p hash %08x key %p deleted %d\n", cur, cur->hash_code, (void*)(uintptr_t)cur->key, (int)get_bit (cur->next));
+		cur = get_node (cur->next);
 	}
 	printf ("---------\n");
 }
@@ -485,6 +524,7 @@ conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 	mark_ptr_t res, *prev;
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
+	node_t *res_node;
 	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
 
 	if (table [bucket] == UNINITIALIZED)
@@ -492,14 +532,15 @@ conc_hashtable_find (conc_hashtable_t *ht, key_t key)
 
 	hash = hash_regular_key (hash);
 	res = list_find_hp (ht, bucket, key, hash, &prev);
-	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key) {
+	res_node = get_node (res);
+	if (res_node && res_node->hash_code == hash && res_node->key == key) {
 		value_t val = NULL;
 		if (ht->lock_value) {
-			value_t val = get_hazardous_pointer (&get_node (res)->value, 0);
+			value_t val = get_hazardous_pointer_with_mask (&res_node->value, 0);
 			clear_hazardous_pointer (1);
 			clear_hazardous_pointer (2);
 		} else {
-			val = get_node (res)->value;
+			val = res_node->value;
 			clear_hazardous_pointers ();
 		}
 		return val;
@@ -526,6 +567,7 @@ value_t
 conc_hashtable_find_signal_safe (conc_hashtable_t *ht, key_t key)
 {
 	mark_ptr_t res, *prev;
+ 	node_t *res_node;
 	hash_t hash = hash_key (key);
 	unsigned bucket = hash % ht->size;
 	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 0);
@@ -535,14 +577,15 @@ conc_hashtable_find_signal_safe (conc_hashtable_t *ht, key_t key)
 
 	hash = hash_regular_key (hash);
 	res = list_find_signal_safe_hp (ht, bucket, key, hash, &prev);
-	if (res && get_node (res)->hash_code == hash && get_node (res)->key == key) {
+	res_node = get_node (res);
+	if (res_node && res_node->hash_code == hash && res_node->key == key) {
 		value_t val = NULL;
 		if (ht->lock_value) {
-			value_t val = get_hazardous_pointer (&get_node (res)->value, 0);
+			value_t val = get_hazardous_pointer_with_mask (&res_node->value, 0);
 			clear_hazardous_pointer (1);
 			clear_hazardous_pointer (2);
 		} else {
-			val = get_node (res)->value;
+			val = res_node->value;
 			clear_hazardous_pointers ();
 		}
 		return val;
@@ -582,7 +625,7 @@ conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 	atomic_fetch_and_dec (&ht->count);
 
 	if (ht->lock_value) {
-		value = get_hazardous_pointer (&get_node (res)->value, 0);
+		value = get_hazardous_pointer_with_mask (&get_node (res)->value, 0);
 		clear_hazardous_pointer (1);
 		clear_hazardous_pointer (2);
 	} else {
@@ -599,6 +642,36 @@ conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 	return value;
 }
 
+typedef gboolean (*foreach_callback) (key_t key, value_t value);
+
+/*
+Locking:
+
+Assumes exclusive access.
+Doesn't use any hazard pointer.
+Doesn't reclaim any deleted node
+
+This is only useful if you want to iterate over the table during a
+stop-the-world kind of scenario where it's safe to assume there are
+no other threads running.
+
+*/
+void
+conc_hashtable_foreach_exclusive (conc_hashtable_t *ht, foreach_callback cb)
+{
+	int i;
+	node_t *cur = get_node (ht->table [0]);
+
+	for (; cur; cur = get_node (cur->next)) {
+		/*if node_t::next bit is set the current node has been deleted*/
+		if (get_bit (cur->next))
+			continue;
+
+		if (is_regular_node (cur->hash_code) && cb (cur->key, cur->value))
+			cur->next = mk_node (get_node (cur->next), 1);
+	}
+}
+
 conc_hashtable_t*
 conc_hashtable_create (gboolean lock_value)
 {
@@ -613,6 +686,12 @@ conc_hashtable_create (gboolean lock_value)
 }
 
 static conc_hashtable_t *_ht;
+
+static gboolean
+delete_odd_keys (key_t key, value_t value)
+{
+	return (PTR_TO_UINT (key) % 2) == 1;
+}
 
 #define INSERT_CNT 1000000
 static void*
@@ -644,8 +723,32 @@ int main ()
 
 	printf ("elements in %d\n", _ht->count);*/
 
-
 	conc_hashtable_t *ht = conc_hashtable_create (FALSE);
+
+	conc_hashtable_insert (ht, UINT_TO_PTR (0), UINT_TO_PTR (0x20));
+	conc_hashtable_insert (ht, UINT_TO_PTR (1), UINT_TO_PTR (0x30));
+	conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x40));
+	conc_hashtable_insert (ht, UINT_TO_PTR (20), UINT_TO_PTR (0x50));
+	conc_hashtable_insert (ht, UINT_TO_PTR (99), UINT_TO_PTR (0x60));
+	printf ("find %p %p %p %p %p\n", 
+		conc_hashtable_find (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find (ht, UINT_TO_PTR (1)),
+		conc_hashtable_find (ht, UINT_TO_PTR (5)),
+		conc_hashtable_find (ht, UINT_TO_PTR (20)),
+		conc_hashtable_find (ht, UINT_TO_PTR (99)));
+	dump_hash (ht);
+
+	conc_hashtable_foreach_exclusive (ht, delete_odd_keys);
+	dump_hash (ht);
+
+	printf ("find %p %p %p %p %p\n", 
+		conc_hashtable_find (ht, UINT_TO_PTR (0)),
+		conc_hashtable_find (ht, UINT_TO_PTR (1)),
+		conc_hashtable_find (ht, UINT_TO_PTR (5)),
+		conc_hashtable_find (ht, UINT_TO_PTR (20)),
+		conc_hashtable_find (ht, UINT_TO_PTR (99)));
+
+/*	conc_hashtable_t *ht = conc_hashtable_create (FALSE);
 
 	printf ("find %p %p %p\n", 
 		conc_hashtable_find (ht, UINT_TO_PTR (0)),
@@ -670,7 +773,6 @@ int main ()
 	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
 	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
 	printf ("%d ", conc_hashtable_insert (ht, UINT_TO_PTR (5), UINT_TO_PTR (0x10)));
-	printf ("%d\n", ht->count);
-
+	printf ("%d\n", ht->count);*/
 	return 0;
 }
