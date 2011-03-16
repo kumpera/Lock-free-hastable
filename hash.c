@@ -589,6 +589,13 @@ conc_hashtable_delete (conc_hashtable_t *ht, key_t key)
 		value = get_node (res)->value;
 		clear_hazardous_pointers ();
 	}
+
+	/*
+	We set value to NULL so if others get a hold on the deleted node
+	there is a smaller change of them seeing value.
+	*/
+	atomic_store (&res->value, NULL);
+
 	return value;
 }
 
