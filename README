@@ -1,0 +1,21 @@
+This is an implementation of Split-Ordered List based extensible Hashtables using SMR for reclamation.
+
+For a better understanding of the algorithms behind it read the following awesome papers:
+
+For the Split-Ordered List based hashtable:
+"Split-Ordered Lists: Lock-Free Extensible Hash Tables" by Ori Shalev & Nir Shavit
+
+For SMR of the Split-Ordered List:
+
+"High Performance Dynamic Lock-Free Hash Tables and List-Based Sets" by Maged M. Michael
+
+For SMR itself (hazard pointers):
+"Safe Memory Reclamation for Dynamic Lock-Free Objects Using Atomic Reads and Writes" by Maged M. Michael
+
+
+The code doesn't work on its own as one has to plugin the SMR machinery.
+
+Some functions are very specific to the kind of scenario I plan to use it so they might look useless.
+
+Code is released under the MIT license.
+
