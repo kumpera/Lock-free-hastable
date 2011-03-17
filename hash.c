@@ -68,13 +68,13 @@ hash_dummy_key (hash_t k)
 	return reverse_value (k & ~0x80000000);
 }
 
-static gboolean
+static inline gboolean
 is_dummy_node (hash_t k)
 {
 	return (k & 0x1) == 0;
 }
 
-static gboolean
+static inline gboolean
 is_regular_node (hash_t k)
 {
 	return (k & 0x1) == 1;
@@ -88,11 +88,7 @@ is_regular_node (hash_t k)
 #define store_barrier __builtin_ia32_sfence
 #define memory_barrier __builtin_ia32_mfence
 
-#define CH_TABLE_INDEX	0
-
-
-
-#define atomic_load(p)  ({ load_barrier (), *(p); })
+#define atomic_load(p)  ({ typeof(*p) __tmp = *(p); load_barrier (); __tmp; })
 #define atomic_store(p, v) do { store_barrier (); *(p) = v; } while (0);
 
 static inline mark_ptr_t
