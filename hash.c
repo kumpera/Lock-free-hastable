@@ -243,12 +243,53 @@ try_again:
 				goto try_again;
 		}
 		cur = next;
-		printf ("next is %p\n", next);
 		set_hazardous_pointer_with_mask (next, 1);
 	}
 done:
 	*out_prev = prev;
 	return cur;
+}
+
+/*
+LOCKING:
+
+Same as list_find_hp.
+
+
+This function has the same logic as list_find_hp except it sweeps the whole hash table
+*/
+static mark_ptr_t
+list_sweep_hp (conc_hashtable_t *ht)
+{
+	mark_ptr_t *table;
+	mark_ptr_t cur, next, *prev;
+
+try_again:
+	table = get_hazardous_pointer ((void**)&ht->table, 0);
+	mark_ptr_t *head = &table [0];
+	prev = head;
+	cur = get_hazardous_pointer ((void**)prev, 1);
+	while (1) {
+		if (get_node (cur) == NULL)
+			break;
+
+		next = get_hazardous_pointer_with_mask ((void**)&cur->next, 0);
+
+		if (atomic_load (prev) != mk_node (get_node (cur), 0))
+			goto try_again;
+
+		if (!get_bit (next)) {
+			prev = &get_node (cur)->next;
+			set_hazardous_pointer_with_mask (cur, 2);
+		} else {
+			if (atomic_compare_and_swap (prev, mk_node (get_node (cur), 0), mk_node (get_node (next), 0)))
+				delete_node (get_node (cur));
+			else
+				goto try_again;
+		}
+		cur = next;
+		set_hazardous_pointer_with_mask (next, 1);
+	}
 }
 
 /*
@@ -327,6 +368,9 @@ list_insert_hp (conc_hashtable_t *ht, unsigned bucket, node_t *node)
 	mark_ptr_t res, *prev;
 	key_t key = node->key;
 	hash_t hash_code = node->hash_code;
+	/*We must do a store barrier before inserting 
+	to make sure all values in @node are globally visible.*/
+	store_barrier ();
 
 	while (1) {
 		res = list_find_hp (ht, bucket, key, hash_code, &prev);
@@ -649,7 +693,8 @@ Locking:
 
 Assumes exclusive access.
 Doesn't use any hazard pointer.
-Doesn't reclaim any deleted node
+Doesn't reclaim any deleted node.
+Since this must run with exclusive access, lock_value is not respected.
 
 This is only useful if you want to iterate over the table during a
 stop-the-world kind of scenario where it's safe to assume there are
@@ -664,12 +709,66 @@ conc_hashtable_foreach_exclusive (conc_hashtable_t *ht, foreach_callback cb)
 
 	for (; cur; cur = get_node (cur->next)) {
 		/*if node_t::next bit is set the current node has been deleted*/
-		if (get_bit (cur->next))
+		if (get_bit (cur->next) || !cur->value || is_dummy_node (cur->hash_code))
 			continue;
 
-		if (is_regular_node (cur->hash_code) && cb (cur->key, cur->value))
+		if (cb (cur->key, cur->value))
 			cur->next = mk_node (get_node (cur->next), 1);
 	}
+}
+
+/*
+LOCKING:
+
+On Entry:
+	HP 0/1/2 must not be in used
+
+On Exit:
+	HP 0/1/2 clear
+
+During callback:
+	HP 0/1 (next, cur)
+	HP 2 has value if lock_value
+
+Consistency:
+	There is no guarantee on what nodes will be seen during the
+	traversal in face of concurrent modification, the only guarantee
+	is that values will be consistent in respect to insert/delete.
+	It's possible to see deleted nodes, but access is reclamation safe. 
+*/
+void
+conc_hashtable_foreach (conc_hashtable_t *ht, foreach_callback cb)
+{
+	mark_ptr_t next;
+	node_t *cur;
+	mark_ptr_t *table = get_hazardous_pointer ((void**)&ht->table, 2);
+	gboolean deleted = FALSE;
+	cur = get_node (get_hazardous_pointer ((void**)&table [0], 0));
+	for (; cur;) {
+		set_hazardous_pointer_with_mask (cur, 1); /* (cur, cur, ?)*/
+		next = get_hazardous_pointer_with_mask ((void**)&cur->next, 0); /* (next, cur, ?) */
+		if (!get_bit (next) && is_regular_node (cur->hash_code)) {
+			/*call CB*/
+			value_t *value = NULL;
+			if (ht->lock_value)
+				value = get_hazardous_pointer_with_mask (&cur->value, 2) /* (next, cur, value)*/;
+			else
+				value = cur->value;
+			if (value && cb (cur->key, value)) {
+				while (!atomic_compare_and_swap (&cur->next, mk_node (get_node (next), 0), mk_node (get_node (next), 1))) {
+					next = get_hazardous_pointer_with_mask ((void**)&cur->next, 0); /* (next, cur, value)*/
+					if (get_bit (next))
+						break;
+				}
+				/*We don't fixup the list during iteration since it would require 4 HPs for prev, cur, next and value*/
+				deleted = TRUE;
+			}
+		}
+		cur = get_node (next);
+	}
+
+	if (deleted)
+		list_sweep_hp (ht);
 }
 
 conc_hashtable_t*
